@@ -43,10 +43,22 @@ The game's own startup flow: after the logo and loading screens, press `5` (or
 Enter) on the warning, then `Q` for sound on or `E` for sound off. The main menu
 then accepts `5`/Enter and the direction keys.
 
-In gameplay, a left click without a movement key held still behaves as a touch
-event. While WASD/arrows are held, it is translated to the `5` action key so
-that attacking or jumping does not cancel movement; the game's touch handler
-otherwise re-evaluates the moving player box and clears held input.
+In gameplay, a left click without a movement key held behaves as a touch
+event. While WASD/arrows are held and the game is in gameplay, a left click
+on open game area is translated to the `5` action key so that attacking or
+jumping does not cancel movement; taps on the on-screen touch buttons and in
+menus stay touch events.
+
+The launcher also keeps keyboard and mouse in sync automatically: the game's
+touch handlers wipe its own held-key state on every pointer release and
+during touch actions (and swallow key events for a while afterwards), which
+used to kill movement until the key was physically released and pressed
+again. The launcher now re-asserts still-held direction keys whenever the
+game has dropped them, so moving with the keyboard while clicking the mouse
+just works. Pointer events that crash the game's own handlers (its
+`pointerReleased` dereferences a touch sprite that is not loaded outside
+gameplay) are contained and logged once instead of breaking the event
+pipeline.
 
 ## Configuration
 
@@ -86,6 +98,13 @@ example the game's `/assassin.sav` becomes `_assassin.sav.rms`.
 MIDI/WAV playback uses `javax.sound.midi` and `javax.sound.sampled`. If no
 synthesizer or audio device is available, the game runs silently instead of
 failing.
+
+The game stops and re-starts the current sound through its own "resume"
+watchdog whenever rendering stalls for more than 2.6 seconds (this happens
+after every loading screen). Its resume path replays the sound with a
+one-shot loop count, which used to turn looping menu music and ambient
+loops into one-shots. The launcher detects that exact stop/close + replay
+pattern and restores the continuous loop.
 
 ## How it works
 
@@ -128,6 +147,16 @@ without modifying the game.
   is wanted).
 - `--config <file>` - alternate properties file.
 
+### Environment debug flags
+
+- `AC_DEBUG=input,sound,all` - trace input events (with the game's internal
+  key/pointer state) and audio player lifecycle decisions to stdout.
+- `AC_FAKE_AUDIO=<ms per KB>` - debug-only fake playback; started players
+  report as playing for a duration proportional to their data size. Use it
+  on machines without an audio device to observe the game's sound
+  serialization logic (drops, resumes, watchdog behaviour) as if audio
+  hardware were present.
+
 ## Known issues
 
 - The game is portrait-only; it explicitly warns about true landscape mode.
@@ -137,9 +166,16 @@ without modifying the game.
   windows scale that image but cannot add detail.
 - Gameplay and save/load have not yet been verified end-to-end in a visual
   session; see `PROGRESS.md`.
-- In gameplay, a left click while holding a movement key always sends the `5`
-  action key; coordinate-based touch movement is used only when no movement key
-  is held.
+- In gameplay, a left click on open area while holding a movement key sends
+  the `5` action key; clicks on the on-screen touch buttons (bottom strip of
+  the canvas) stay touch events even while moving.
 - The removed virtual keypad is not clickable. Use the keyboard soft keys.
 - The game's IGP/Gameloft Live middleware initializes from `dataIGP`; its
   online portal links are not used and `platformRequest` is a no-op.
+- The game plays at most one sound at a time (its own design: it refuses to
+  start a new sound while the previous one is still playing). That is the
+  original behaviour, not a launcher bug.
+- The game's touch sprite (`e.e[13]`) is not loaded outside gameplay, so the
+  game's own pointer handlers throw a NullPointerException there. The
+  launcher contains these failures and logs them once
+  (`[Launcher] suppressed MIDlet ...`); they are harmless.

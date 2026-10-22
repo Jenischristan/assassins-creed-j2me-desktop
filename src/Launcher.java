@@ -39,6 +39,14 @@ public final class Launcher implements Display.Painter {
     private static final int CANVAS_WIDTH = 480;
     private static final int CANVAS_HEIGHT = 640;
 
+    // Directional key codes (MIDlet numpad keys) and their bits in the
+    // game's held-key bitmask, used to detect and repair input wipes.
+    private static final int[] DIRECTION_KEYS = {50, 52, 54, 56};
+    private static final int GAMEPLAY_STATE = 8;
+    // Taps in the lower part of the canvas hit the game's own on-screen
+    // buttons and must stay pointer events even while a direction key is held.
+    private static final int TOUCH_BUTTON_ZONE_Y = 480;
+
     private final Image canvasImage;
     private final boolean headless;
     private boolean debugStats;
@@ -209,6 +217,7 @@ public final class Launcher implements Display.Painter {
                 panel.requestFocusInWindow();
             }
         });
+        startInputResyncTimer();
     }
 
     private void pressKey(int code) {
@@ -241,13 +250,67 @@ public final class Launcher implements Display.Painter {
         heldKeys.clear();
     }
 
-    private void restoreHeldKeys(Canvas current) {
+    // The MIDlet's touch handlers clear its own held-key state on every
+    // pointer release and while a touch action animates, and they swallow
+    // (and clear!) key events during that window. Because the operating
+    // system will not resend a keyPressed for a key the user is still
+    // holding, any such wipe used to kill movement until the key was
+    // released and pressed again. resyncHeldKeys re-asserts only direction
+    // keys that are still physically held but missing from the game's
+    // bitmask, which restores movement without creating false key edges for
+    // fire/soft keys.
+    private static int directionKeyBit(int code) {
+        switch (code) {
+            case 50:
+                return 1 << 2;
+            case 52:
+                return 1 << 4;
+            case 54:
+                return 1 << 6;
+            case 56:
+                return 1 << 8;
+            default:
+                return 0;
+        }
+    }
+
+    private boolean isDirectionKeyHeld(int code) {
+        return heldKeys.contains(code);
+    }
+
+    private void resyncHeldKeys(Canvas current) {
         if (current == null) {
             return;
         }
-        for (int code : heldKeys) {
-            current.dispatchKeyPressed(code);
+        int mask = current.getGameHeldKeyMask();
+        if (mask < 0) {
+            return; // game state unavailable; do not guess
         }
+        for (int code : DIRECTION_KEYS) {
+            if (!isDirectionKeyHeld(code)) {
+                continue;
+            }
+            int bit = directionKeyBit(code);
+            if (bit != 0 && (mask & bit) == 0) {
+                current.dispatchKeyPressed(code);
+            }
+        }
+    }
+
+    private void startInputResyncTimer() {
+        if (headless) {
+            return;
+        }
+        // Periodic safety net: repairs movement if the game wiped held keys
+        // at any point (touch actions, screen transitions, focus changes).
+        new javax.swing.Timer(250, new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                Canvas current = canvas;
+                if (current != null && !heldKeys.isEmpty()) {
+                    resyncHeldKeys(current);
+                }
+            }
+        }).start();
     }
 
     @Override
@@ -553,6 +616,7 @@ public final class Launcher implements Display.Painter {
 
     private final class GamePanel extends JPanel {
         private boolean pointerDown;
+        private boolean translatedClick;
         private int pointerX = -1;
         private int pointerY = -1;
         private int mouseX = -1;
@@ -604,12 +668,27 @@ public final class Launcher implements Display.Painter {
                         return;
                     }
                     Canvas current = canvas;
-                    pointerDown = true;
                     pointerX = p[0];
                     pointerY = p[1];
                     mouseX = p[0];
                     mouseY = p[1];
                     lastDragRepress = System.currentTimeMillis();
+                    // While moving with the keyboard, a tap on open gameplay
+                    // area is sent as the 5 (attack) key instead: the game's
+                    // touch handler would otherwise wipe the held input and
+                    // any touch action would cancel the movement. Taps on the
+                    // on-screen touch buttons and in menus stay pointer
+                    // events.
+                    if (shouldTranslateTapToFire()) {
+                        translatedClick = true;
+                        pointerDown = false;
+                        if (current != null) {
+                            current.dispatchKeyPressed(53);
+                        }
+                        return;
+                    }
+                    translatedClick = false;
+                    pointerDown = true;
                     if (current != null) {
                         current.dispatchPointerPressed(p[0], p[1]);
                     }
@@ -625,16 +704,31 @@ public final class Launcher implements Display.Painter {
                         releaseKey(-6);
                         return;
                     }
-                    if (!pointerDown) {
+                    if (!SwingUtilities.isLeftMouseButton(e)) {
                         return;
                     }
                     Canvas current = canvas;
+                    if (translatedClick) {
+                        translatedClick = false;
+                        if (current != null) {
+                            current.dispatchKeyReleased(53);
+                            resyncHeldKeys(current);
+                        }
+                        pointerX = -1;
+                        pointerY = -1;
+                        mouseX = -1;
+                        mouseY = -1;
+                        return;
+                    }
+                    if (!pointerDown) {
+                        return;
+                    }
                     int x = mouseX >= 0 ? mouseX : pointerX;
                     int y = mouseY >= 0 ? mouseY : pointerY;
                     pointerDown = false;
                     if (current != null) {
                         current.dispatchPointerReleased(x, y);
-                        restoreHeldKeys(current);
+                        resyncHeldKeys(current);
                     }
                     pointerX = -1;
                     pointerY = -1;
@@ -645,7 +739,7 @@ public final class Launcher implements Display.Painter {
             addMouseMotionListener(new MouseAdapter() {
                 @Override
                 public void mouseDragged(MouseEvent e) {
-                    if (!pointerDown) {
+                    if (!pointerDown || translatedClick) {
                         return;
                     }
                     int[] p = toCanvas(e.getX(), e.getY());
@@ -665,7 +759,7 @@ public final class Launcher implements Display.Painter {
                     }
                     current.dispatchPointerReleased(pointerX, pointerY);
                     current.dispatchPointerPressed(p[0], p[1]);
-                    restoreHeldKeys(current);
+                    resyncHeldKeys(current);
                     pointerX = p[0];
                     pointerY = p[1];
                     lastDragRepress = now;
@@ -673,15 +767,46 @@ public final class Launcher implements Display.Painter {
             });
         }
 
+        // Translates a left click into the 5 action key while a movement key
+        // is physically held and the MIDlet is in gameplay (state 8), except
+        // over the on-screen touch button strip at the bottom of the canvas.
+        private boolean shouldTranslateTapToFire() {
+            Canvas current = canvas;
+            if (current == null) {
+                return false;
+            }
+            if (pointerY >= TOUCH_BUTTON_ZONE_Y) {
+                return false;
+            }
+            boolean moving = false;
+            for (int code : DIRECTION_KEYS) {
+                if (isDirectionKeyHeld(code)) {
+                    moving = true;
+                    break;
+                }
+            }
+            if (!moving) {
+                return false;
+            }
+            return current.getGameScreenState() == GAMEPLAY_STATE;
+        }
+
         private void cancelPointer() {
             Canvas current = canvas;
-            if (!pointerDown) {
+            if (!pointerDown && !translatedClick) {
                 return;
             }
+            boolean wasTranslated = translatedClick;
             pointerDown = false;
+            translatedClick = false;
             if (current != null) {
-                current.dispatchPointerReleased(mouseX >= 0 ? mouseX : pointerX,
-                        mouseY >= 0 ? mouseY : pointerY);
+                if (wasTranslated) {
+                    current.dispatchKeyReleased(53);
+                } else {
+                    current.dispatchPointerReleased(mouseX >= 0 ? mouseX : pointerX,
+                            mouseY >= 0 ? mouseY : pointerY);
+                }
+                resyncHeldKeys(current);
             }
             pointerX = -1;
             pointerY = -1;

@@ -31,6 +31,60 @@ final class AudioPlayer implements Player {
     private Clip clip;
     private boolean failed;
 
+    // Debug-only fake playback: with no audio device, clips/sequencers cannot
+    // run, so getState() would demote immediately and the game's own
+    // sound-serialization logic can never be observed. AC_FAKE_AUDIO=<ms per KB>
+    // makes started players report running for a duration proportional to
+    // their data size, which emulates real hardware timing closely enough to
+    // trace the game's audio decisions.
+    private static final int FAKE_MS_PER_KB = fakeMsPerKb();
+    private final int id = ++idCounter;
+    private long fakeStartMs;
+    private long fakeDurationMs;
+    // Set by Manager when this player was created shortly after a looping
+    // player with identical data was closed. The game's own "resume after
+    // stall" logic does exactly that (its paint watchdog stops the current
+    // sound via stop()+close() and then replays it with setLoopCount(1)),
+    // which turned every looping ambient/music track into a one-shot after
+    // the first loading screen. With the hint active, a following
+    // setLoopCount(1) is treated as "keep looping" once.
+    private boolean resumeLoopHint;
+    private boolean resumeLoopHintUsed;
+
+    final int contentHash() {
+        return 31 * java.util.Arrays.hashCode(data) + data.length;
+    }
+
+    final int idForDebug() {
+        return id;
+    }
+
+    final void markResumeLoopHint() {
+        resumeLoopHint = true;
+    }
+
+    private static int idCounter;
+
+    private static int fakeMsPerKb() {
+        String spec = System.getProperty("ac.fake.audio", System.getenv("AC_FAKE_AUDIO"));
+        if (spec == null || spec.trim().isEmpty()) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(spec.trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    private void debug(String what) {
+        if (javax.microedition.AcDebug.SOUND) {
+            javax.microedition.AcDebug.log("sound", "P" + id + " " + what
+                    + " type=" + contentType + " state=" + state + " loop="
+                    + loopCount);
+        }
+    }
+
     AudioPlayer(byte[] data, String contentType) {
         this.data = data;
         this.contentType = contentType == null ? "audio/x-wav" : contentType;
@@ -74,7 +128,7 @@ final class AudioPlayer implements Player {
                 }
             }
         }
-        if (sequence == null && clip == null) {
+        if (sequence == null && clip == null && FAKE_MS_PER_KB <= 0) {
             failed = true;
             System.err.println("[AudioPlayer] cannot play " + contentType + " ("
                     + data.length + " bytes). midi=" + midiError + " wav=" + wavError);
@@ -107,6 +161,9 @@ final class AudioPlayer implements Player {
     private synchronized void ensureSequencer() {
         if (sequencer != null || sequence == null) {
             return;
+        }
+        if (FAKE_MS_PER_KB > 0) {
+            return; // debug fake playback: never touch real MIDI devices
         }
         try {
             sequencer = openSequencerWithSynthesizer();
@@ -225,11 +282,19 @@ final class AudioPlayer implements Player {
                 } else {
                     clip.loop(loops);
                 }
+            } else if (FAKE_MS_PER_KB > 0) {
+                fakeStartMs = System.currentTimeMillis();
+                fakeDurationMs = data.length / 1024L * FAKE_MS_PER_KB;
+                if (loopCountSet && loopCount < 0) {
+                    fakeDurationMs = Long.MAX_VALUE; // loops forever
+                }
+                debug("fake start, ms=" + fakeDurationMs);
             }
         } catch (Exception e) {
             failed = true;
         }
         state = STARTED;
+        debug("start");
     }
 
     public synchronized void stop() throws MediaException {
@@ -248,6 +313,7 @@ final class AudioPlayer implements Player {
         if (state == STARTED) {
             state = PREFETCHED;
         }
+        debug("stop");
     }
 
     public synchronized void deallocate() {
@@ -283,6 +349,10 @@ final class AudioPlayer implements Player {
             clip = null;
         }
         state = CLOSED;
+        debug("close");
+        if (loopCountSet && loopCount < 0) {
+            Manager.noteLoopedClose(contentHash());
+        }
         for (PlayerListener listener : new ArrayList<PlayerListener>(listeners)) {
             listener.playerUpdate(this, PlayerListener.CLOSED, null);
         }
@@ -294,6 +364,13 @@ final class AudioPlayer implements Player {
         }
         if (count < -1) {
             throw new IllegalArgumentException("invalid loop count");
+        }
+        if (resumeLoopHint && !resumeLoopHintUsed) {
+            resumeLoopHintUsed = true;
+            if (count == 1) {
+                debug("resume hint: restoring continuous loop");
+                count = -1;
+            }
         }
         loopCount = count;
         loopCountSet = true;
@@ -357,10 +434,18 @@ final class AudioPlayer implements Player {
         if (state == STARTED && state != CLOSED) {
             if (sequencer != null && !sequencer.isRunning()) {
                 state = PREFETCHED;
+                debug("demote: sequencer stopped");
             } else if (clip != null && !clip.isRunning() && !failed) {
                 state = PREFETCHED;
+                debug("demote: clip stopped");
             } else if (failed) {
                 state = PREFETCHED;
+                debug("demote: failed");
+            } else if (FAKE_MS_PER_KB > 0 && clip == null && sequencer == null) {
+                if (System.currentTimeMillis() - fakeStartMs >= fakeDurationMs) {
+                    state = PREFETCHED;
+                    debug("demote: fake playback finished");
+                }
             }
         }
         return state;
