@@ -9,6 +9,7 @@ public final class AcDebug {
     public static final boolean SOUND;
     public static final boolean INPUT;
     public static final boolean SOUND_DUMP;
+    public static final boolean PROBE;
 
     static {
         String spec = System.getProperty("ac.debug", System.getenv("AC_DEBUG"));
@@ -20,12 +21,14 @@ public final class AcDebug {
         SOUND = all || spec.contains("sound");
         INPUT = all || spec.contains("input");
         SOUND_DUMP = all || spec.contains("dump");
+        PROBE = all || spec.contains("probe");
     }
 
     private AcDebug() {
     }
 
     public static void log(String topic, String message) {
-        System.out.println("[ac-debug/" + topic + "] " + message);
+        System.out.println("[ac-debug/" + topic + "] " + System.currentTimeMillis()
+                + " " + message);
     }
 }

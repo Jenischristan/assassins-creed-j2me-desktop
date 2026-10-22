@@ -55,10 +55,16 @@ during touch actions (and swallow key events for a while afterwards), which
 used to kill movement until the key was physically released and pressed
 again. The launcher now re-asserts still-held direction keys whenever the
 game has dropped them, so moving with the keyboard while clicking the mouse
-just works. Pointer events that crash the game's own handlers (its
-`pointerReleased` dereferences a touch sprite that is not loaded outside
-gameplay) are contained and logged once instead of breaking the event
-pipeline.
+just works.
+
+The game's own pointer handlers also crash on every pointer release outside
+gameplay: `e.z()` and `e.pointerReleased()` write `e.e[13].s` without a null
+check, but that touch-feedback sprite is only loaded when the level pack
+declares touch data (the game's own paint code null-checks it). `build.sh`
+patches those four writes with a null guard at build time (see
+`tools/PatchE.java`), so mouse clicks no longer throw; the dispatch wrappers
+in the MIDP shim still contain and de-duplicate any other game-side handler
+crash (`[Launcher] suppressed MIDlet ...`, logged once per distinct cause).
 
 ## Configuration
 
@@ -97,7 +103,22 @@ example the game's `/assassin.sav` becomes `_assassin.sav.rms`.
 
 MIDI/WAV playback uses `javax.sound.midi` and `javax.sound.sampled`. If no
 synthesizer or audio device is available, the game runs silently instead of
-failing.
+failing. A missing/broken MIDI backend now announces itself on stderr:
+
+```
+[AudioPlayer] MIDI playback unavailable (...); music and ambient tracks will stay silent
+```
+
+If you see that line, ambient/music tracks cannot start on your JVM (no
+audio device, headless JRE, or no Gervill soundbank) - the game swallows the
+start failure by design and never retries. WAV sound effects use a separate
+path and can still work in that case.
+
+The game requests one ambient/music track per level load: levels 0-2/4-6/8-10
+play a one-shot sting (`A(1/2/3)`), levels 3/7/11 loop track 5
+(`g(5, -1)`). All sounds share a single voice (`ef`) - the game refuses to
+start a new sound while the previous one is still playing and drops the
+request; that is original behaviour (see Known issues).
 
 The game stops and re-starts the current sound through its own "resume"
 watchdog whenever rendering stalls for more than 2.6 seconds (this happens
@@ -150,7 +171,15 @@ without modifying the game.
 ### Environment debug flags
 
 - `AC_DEBUG=input,sound,all` - trace input events (with the game's internal
-  key/pointer state) and audio player lifecycle decisions to stdout.
+  key/pointer state) and audio player lifecycle decisions to stdout. All
+  trace lines carry a millisecond timestamp.
+- `AC_DEBUG=probe` (or include `probe`/`all`) - additionally dump the game's
+  sound state machine (`v` screen, `eg` requested sound, `eh` saved sound,
+  `ei` replay counter, `cE` sound-enabled flag, every static `Player` field
+  with its live state) whenever it changes. This answers "why is the ambient
+  not playing" from a single run: `eg=1` with a player stuck at `state=300`
+  means the request happened but start failed; `eg=0` means the game never
+  requested a track.
 - `AC_FAKE_AUDIO=<ms per KB>` - debug-only fake playback; started players
   report as playing for a duration proportional to their data size. Use it
   on machines without an audio device to observe the game's sound
@@ -175,7 +204,9 @@ without modifying the game.
 - The game plays at most one sound at a time (its own design: it refuses to
   start a new sound while the previous one is still playing). That is the
   original behaviour, not a launcher bug.
-- The game's touch sprite (`e.e[13]`) is not loaded outside gameplay, so the
-  game's own pointer handlers throw a NullPointerException there. The
-  launcher contains these failures and logs them once
-  (`[Launcher] suppressed MIDlet ...`); they are harmless.
+- The game's touch sprite (`e.e[13]`) is not loaded outside gameplay and the
+  game's own pointer handlers used to dereference it unchecked. Those four
+  writes are null-guarded at build time by `tools/PatchE.java` (the patched
+  `e.class` in `build/` shadows the jar copy); the dispatch wrappers still
+  contain any other game-side handler crash and log it once per distinct
+  cause (`[Launcher] suppressed MIDlet ...`).

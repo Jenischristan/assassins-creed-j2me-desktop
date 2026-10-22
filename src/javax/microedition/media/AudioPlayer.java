@@ -178,6 +178,13 @@ final class AudioPlayer implements Player {
                 closeMidi();
                 if (clip == null) {
                     failed = true;
+                    // Without this line a missing/broken MIDI backend (no
+                    // audio device, headless JRE, no Gervill soundbank) looks
+                    // exactly like "the game has no ambient sounds": the game
+                    // swallows the start failure and never retries.
+                    System.err.println("[AudioPlayer] MIDI playback unavailable"
+                            + " (" + first + " / " + second + "); music and"
+                            + " ambient tracks will stay silent");
                 }
             }
         }

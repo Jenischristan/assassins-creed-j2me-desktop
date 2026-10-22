@@ -135,13 +135,13 @@ public abstract class Canvas extends Displayable {
         return "key " + keyCode;
     }
 
-    // The MIDlet's pointer handlers dereference sprites that are only loaded
-    // when the touch flag is set (e.g. e.e[13].s in pointerReleased), so on
-    // screens without that sprite every pointer event would throw a
-    // NullPointerException on the AWT event thread. That killed the rest of
-    // the launcher's event handling (held-key restore, pointer cleanup). The
-    // dispatch wrappers therefore contain the failure, log it once per
-    // distinct cause, and let the launcher continue as if nothing happened.
+    // The MIDlet's pointer/key handlers can crash on data-dependent game bugs
+    // (e.g. the e.e[13] touch sprite, now null-guarded by tools/PatchE.java).
+    // A throw on the AWT event thread used to kill the rest of the launcher's
+    // event handling (held-key restore, pointer cleanup). The dispatch
+    // wrappers contain the failure and log it once per distinct cause -
+    // coordinates and key codes are stripped from the signature so repeated
+    // events at different positions do not flood the console.
     private static final Map<String, Boolean> reportedDispatchFailures =
             new HashMap<String, Boolean>();
 
@@ -153,10 +153,23 @@ public abstract class Canvas extends Displayable {
         try {
             run.run();
         } catch (Throwable t) {
-            String key = what + ": " + t;
+            // Collapse "pointerReleased 170,421" / "pointerReleased 55,634" ...
+            // into one signature per distinct failure site.
+            String op = what;
+            int sp = op.indexOf(' ');
+            if (sp > 0) {
+                op = op.substring(0, sp);
+            }
+            StringBuilder sig = new StringBuilder(op).append(" <- ").append(t);
+            StackTraceElement[] st = t.getStackTrace();
+            for (int i = 0; i < st.length && i < 8; i++) {
+                sig.append(" / ").append(st[i]);
+            }
+            String key = sig.toString();
             synchronized (reportedDispatchFailures) {
                 if (reportedDispatchFailures.put(key, Boolean.TRUE) == null) {
-                    System.err.println("[Launcher] suppressed MIDlet " + key);
+                    System.err.println("[Launcher] suppressed MIDlet " + what
+                            + ": " + t);
                     t.printStackTrace();
                 }
             }
@@ -266,6 +279,59 @@ public abstract class Canvas extends Displayable {
         } catch (Throwable t) {
             return -1;
         }
+    }
+
+    /**
+     * Sound-engine probe (AC_DEBUG=probe): dumps the MIDlet's sound state
+     * machine - current screen, requested sound id (eg), saved sound id (eh),
+     * delayed-replay counter (ei), sound-enabled flag (cE) and every static
+     * Player field with its live state - so sound regressions can be traced
+     * without patching the game. Returns null when the probe is disabled.
+     */
+    public final String soundProbeState() {
+        if (!javax.microedition.AcDebug.PROBE) {
+            return null;
+        }
+        try {
+            StringBuilder sb = new StringBuilder();
+            appendInt(sb, "v", "v");
+            appendInt(sb, "eg", "eg");
+            appendInt(sb, "eh", "eh");
+            appendInt(sb, "ei", "ei");
+            Field cef = gameField("cE");
+            sb.append(" cE=").append(cef == null ? "?"
+                    : String.valueOf(cef.getBoolean(this)));
+            Class<?> c = getClass();
+            while (c != null && c != Canvas.class && c != Displayable.class
+                    && c != Object.class) {
+                for (Field pf : c.getDeclaredFields()) {
+                    if (!java.lang.reflect.Modifier.isStatic(pf.getModifiers())
+                            || !javax.microedition.media.Player.class
+                                    .isAssignableFrom(pf.getType())) {
+                        continue;
+                    }
+                    pf.setAccessible(true);
+                    Object p = pf.get(null);
+                    sb.append(' ').append(pf.getName()).append('=')
+                            .append(p == null ? "null"
+                                    : "@" + Integer.toHexString(
+                                            System.identityHashCode(p))
+                                            + " state="
+                                            + ((javax.microedition.media.Player) p)
+                                                    .getState());
+                }
+                c = c.getSuperclass();
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return " probe-failed: " + t;
+        }
+    }
+
+    private void appendInt(StringBuilder sb, String label, String fieldName)
+            throws IllegalAccessException {
+        Field f = gameField(fieldName);
+        sb.append(label).append('=').append(f == null ? -1 : f.getInt(this));
     }
 
     private String gameState() {

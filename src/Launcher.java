@@ -218,6 +218,30 @@ public final class Launcher implements Display.Painter {
             }
         });
         startInputResyncTimer();
+        startSoundProbeTimer();
+    }
+
+    // AC_DEBUG=probe: log the MIDlet sound state machine whenever it changes,
+    // so "why does the ambient track not play" questions can be answered from
+    // a single run (see Canvas.soundProbeState for the dumped fields).
+    private void startSoundProbeTimer() {
+        if (!javax.microedition.AcDebug.PROBE || headless) {
+            return;
+        }
+        final String[] last = {""};
+        new javax.swing.Timer(400, new java.awt.event.ActionListener() {
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                Canvas current = canvas;
+                if (current == null) {
+                    return;
+                }
+                String s = current.soundProbeState();
+                if (s != null && !s.equals(last[0])) {
+                    last[0] = s;
+                    javax.microedition.AcDebug.log("probe", s);
+                }
+            }
+        }).start();
     }
 
     private void pressKey(int code) {
